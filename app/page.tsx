@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 
 type ChatMessage = {
   id: string;
@@ -166,6 +166,7 @@ export default function Home() {
           const chunk = decoder.decode(value, { stream: true });
           accumulatedContent += chunk;
 
+          // Update UI immediately with each chunk
           setMessages((prev) =>
             prev.map((msg) =>
               msg.id === assistantMessageId

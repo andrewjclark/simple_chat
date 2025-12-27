@@ -3,14 +3,10 @@
 import { useState, useRef, useEffect } from "react";
 import { BotConfig, DEFAULT_BOTS } from "@/lib/bots";
 
-type ChatMessage = {
-  id: string;
-  role: "user" | "assistant";
-  botId?: string; // set only for assistant messages
-  content: string;
-  createdAt: number;
-  responseTimeMs?: number;
-};
+type ConversationAction = 
+  | { type: "response"; id: string; botId: string; content: string; createdAt: number; responseTimeMs?: number; }
+  | { type: "skip"; id: string; botId: string; createdAt: number; }
+  | { type: "user_message"; id: string; content: string; createdAt: number; };
 
 // Simple ID generator
 function generateId(): string {
@@ -20,6 +16,7 @@ function generateId(): string {
 type BotEditState = {
   id: string | null;
   name: string;
+  role: string;
   personality: string;
   description: string;
   model: string;
@@ -29,7 +26,7 @@ type BotEditState = {
 
 export default function Home() {
   const [bots, setBots] = useState<BotConfig[]>(DEFAULT_BOTS);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [actions, setActions] = useState<ConversationAction[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isResponding, setIsResponding] = useState(false);
@@ -40,6 +37,11 @@ export default function Home() {
     DEFAULT_BOTS[0]?.rules || "Provide a short, succinct and casual response."
   );
   const [nextBotIndex, setNextBotIndex] = useState<number>(0);
+  const [activityType, setActivityType] = useState<string>("Brainstorming Session");
+  const [activityPrompt, setActivityPrompt] = useState<string>("");
+  const [editingActivityType, setEditingActivityType] = useState<boolean>(false);
+  const [editingPrompt, setEditingPrompt] = useState<boolean>(false);
+  const [showBotList, setShowBotList] = useState<boolean>(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -48,7 +50,7 @@ export default function Home() {
 
   useEffect(() => {
     scrollToBottom();
-  }, [messages]);
+  }, [actions]);
 
   const formatErrorMessage = async (response: Response): Promise<string> => {
     try {
@@ -93,6 +95,11 @@ export default function Home() {
     // Build list of all bot names
     const botNames = allBots.map(b => b.name).join(", ");
     
+    // Build role text
+    const roleText = bot.role 
+      ? `a ${bot.role}`
+      : "";
+    
     // Build description of the bot
     const botDescription = bot.description || `a participant named ${bot.name}`;
     
@@ -101,7 +108,19 @@ export default function Home() {
       ? ` Your personality is: ${bot.personality}.`
       : "";
     
-    return `This is a multi-user conversation between ${botNames} and the user. You are ${bot.name}, ${botDescription}.${personalityText}`;
+    // Add activity prompt if available
+    const promptText = activityPrompt 
+      ? `\n\nThe current activity prompt is: "${activityPrompt}"`
+      : "";
+    
+    // Construct the "You are" statement
+    let youAreStatement = `You are ${bot.name}`;
+    if (roleText) {
+      youAreStatement += `, ${roleText}`;
+    }
+    youAreStatement += `. You are: ${botDescription}.`;
+    
+    return `This is a multi-user conversation between ${botNames} and the user. ${youAreStatement}${personalityText}${promptText}`;
   };
 
   // Helper function to build the turn instruction system message
@@ -115,14 +134,12 @@ export default function Home() {
     return `${bot.name}, it is your turn to respond now. Your response will be added to the conversation log and then someone else will respond.${rulesText}`;
   };
 
-  // Helper function to get speaker label for a message
-  // Each message has its author stored: user messages have role="user",
-  // assistant messages have botId pointing to the bot that authored them
-  const getSpeakerLabel = (msg: ChatMessage): string => {
-    if (msg.role === "user") return "User";
-    if (msg.role === "assistant" && msg.botId) {
-      const bot = bots.find((b) => b.id === msg.botId);
-      if (bot) return bot.name; // e.g. "Upside", "Downside", "Missing Pieces"
+  // Helper function to get speaker label for an action
+  const getSpeakerLabel = (action: ConversationAction): string => {
+    if (action.type === "user_message") return "User";
+    if (action.type === "response" || action.type === "skip") {
+      const bot = bots.find((b) => b.id === action.botId);
+      if (bot) return bot.name;
     }
     return "Assistant";
   };
@@ -147,7 +164,7 @@ export default function Home() {
   const streamBotReply = async (
     bot: BotConfig,
     botMessageId: string,
-    history: ChatMessage[],
+    history: ConversationAction[],
   ): Promise<string> => {
     const startTime = performance.now();
     
@@ -160,23 +177,24 @@ export default function Home() {
     const turnInstruction = buildTurnInstruction(bot);
     
     // Convert history to API format with proper roles
-    const historyMessages = history.map((msg) => {
-      const speaker = getSpeakerLabel(msg);
-      // For assistant messages, we label them with the bot name
-      // For user messages, we keep them as user role
-      if (msg.role === "user") {
-        return {
-          role: "user" as const,
-          content: `${speaker}: ${msg.content}`,
-        };
-      } else {
-        // Assistant messages from other bots
-        return {
-          role: "assistant" as const,
-          content: `${speaker}: ${msg.content}`,
-        };
-      }
-    });
+    const historyMessages = history
+      .filter((action) => action.type === "user_message" || action.type === "response") // Skip skip actions
+      .map((action) => {
+        const speaker = getSpeakerLabel(action);
+        if (action.type === "user_message") {
+          return {
+            role: "user" as const,
+            content: `${speaker}: ${action.content}`,
+          };
+        } else if (action.type === "response") {
+          return {
+            role: "assistant" as const,
+            content: `${speaker}: ${action.content}`,
+          };
+        }
+        return null;
+      })
+      .filter((msg): msg is { role: "user" | "assistant"; content: string } => msg !== null);
     
     // Build the complete message array
     const apiMessages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
@@ -214,11 +232,11 @@ export default function Home() {
             ? `🌐 Network Connection Error\n\nUnable to connect to the server.`
             : `❌ Request Failed\n\nError: ${fetchError instanceof Error ? fetchError.message : "Unknown error"}`;
 
-        setMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === botMessageId
-              ? { ...msg, content: errorMessage, responseTimeMs }
-              : msg
+        setActions((prev) =>
+          prev.map((action) =>
+            action.id === botMessageId && action.type === "response"
+              ? { ...action, content: errorMessage, responseTimeMs }
+              : action
           )
         );
         return errorMessage;
@@ -228,11 +246,11 @@ export default function Home() {
         const endTime = performance.now();
         const responseTimeMs = Math.round(endTime - startTime);
         const errorMessage = await formatErrorMessage(response);
-        setMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === botMessageId
-              ? { ...msg, content: errorMessage, responseTimeMs }
-              : msg
+        setActions((prev) =>
+          prev.map((action) =>
+            action.id === botMessageId && action.type === "response"
+              ? { ...action, content: errorMessage, responseTimeMs }
+              : action
           )
         );
         return errorMessage;
@@ -254,11 +272,11 @@ export default function Home() {
           // Strip bot name prefix from accumulated content for display
           const cleanedContent = stripBotNamePrefix(accumulatedContent, bot.name);
 
-          setMessages((prev) =>
-            prev.map((msg) =>
-              msg.id === botMessageId
-                ? { ...msg, content: cleanedContent }
-                : msg
+          setActions((prev) =>
+            prev.map((action) =>
+              action.id === botMessageId && action.type === "response"
+                ? { ...action, content: cleanedContent }
+                : action
             )
           );
         }
@@ -270,11 +288,11 @@ export default function Home() {
         // Final cleanup: strip bot name prefix from the complete response
         const finalContent = stripBotNamePrefix(accumulatedContent, bot.name);
         
-        setMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === botMessageId
-              ? { ...msg, content: finalContent, responseTimeMs }
-              : msg
+        setActions((prev) =>
+          prev.map((action) =>
+            action.id === botMessageId && action.type === "response"
+              ? { ...action, content: finalContent, responseTimeMs }
+              : action
           )
         );
         
@@ -283,11 +301,11 @@ export default function Home() {
         const endTime = performance.now();
         const responseTimeMs = Math.round(endTime - startTime);
         const streamErrorMessage = `❌ Stream Reading Error\n\nFailed to read the streaming response.\n\nError: ${streamError instanceof Error ? streamError.message : "Unknown stream error"}`;
-        setMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === botMessageId
-              ? { ...msg, content: streamErrorMessage, responseTimeMs }
-              : msg
+        setActions((prev) =>
+          prev.map((action) =>
+            action.id === botMessageId && action.type === "response"
+              ? { ...action, content: streamErrorMessage, responseTimeMs }
+              : action
           )
         );
         return streamErrorMessage;
@@ -297,11 +315,11 @@ export default function Home() {
       const responseTimeMs = Math.round(endTime - startTime);
       console.error("Error streaming bot reply:", error);
       const errorMessage = `❌ Unexpected Error\n\nAn unexpected error occurred.\n\nError: ${error instanceof Error ? error.message : "Unknown error"}`;
-      setMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === botMessageId
-            ? { ...msg, content: errorMessage, responseTimeMs }
-            : msg
+      setActions((prev) =>
+        prev.map((action) =>
+          action.id === botMessageId && action.type === "response"
+            ? { ...action, content: errorMessage, responseTimeMs }
+            : action
         )
       );
       return errorMessage;
@@ -309,19 +327,89 @@ export default function Home() {
   };
 
   const sendMessage = async () => {
-    if (!input.trim() || isLoading || isResponding) return;
+    if (isLoading || isResponding) return;
 
-    const userMessage: ChatMessage = {
+    // If input is empty, skip user's turn and cycle through all remaining bots
+    if (!input.trim()) {
+      setIsResponding(true);
+      setIsLoading(true);
+      
+      // Determine which bots to respond
+      const startIndex = actions.length === 0 ? 0 : nextBotIndex;
+      let completeHistory = [...actions];
+      
+      // Cycle through all remaining bots
+      for (let i = startIndex; i < bots.length; i++) {
+        const bot = bots[i];
+        if (!bot) continue;
+        
+        const botMessageId = generateId();
+        const responseAction: ConversationAction = {
+          type: "response",
+          id: botMessageId,
+          botId: bot.id,
+          content: "",
+          createdAt: Date.now(),
+        };
+        
+        setActions((prev) => [...prev, responseAction]);
+        const botResponseContent = await streamBotReply(bot, botMessageId, completeHistory);
+        
+        const botResponse: ConversationAction = {
+          ...responseAction,
+          content: botResponseContent,
+        };
+        completeHistory = [...completeHistory, botResponse];
+      }
+      
+      setIsLoading(false);
+      setIsResponding(false);
+      setNextBotIndex(0);
+      return;
+    }
+
+    // User has entered text - add message and cycle through all bots
+    const userMessage: ConversationAction = {
+      type: "user_message",
       id: generateId(),
-      role: "user",
       content: input.trim(),
       createdAt: Date.now(),
     };
 
-    // Add user message only - don't trigger bot responses
-    setMessages((prev) => [...prev, userMessage]);
+    setActions((prev) => [...prev, userMessage]);
     setInput("");
-    // Reset bot index to start from the first bot for the next round
+    
+    setIsResponding(true);
+    setIsLoading(true);
+    
+    let completeHistory: ConversationAction[] = [...actions, userMessage];
+    
+    // Automatically cycle through all bots
+    for (let i = 0; i < bots.length; i++) {
+      const bot = bots[i];
+      if (!bot) continue;
+      
+      const botMessageId = generateId();
+      const responseAction: ConversationAction = {
+        type: "response",
+        id: botMessageId,
+        botId: bot.id,
+        content: "",
+        createdAt: Date.now(),
+      };
+      
+      setActions((prev) => [...prev, responseAction]);
+      const botResponseContent = await streamBotReply(bot, botMessageId, completeHistory);
+      
+      const botResponse: ConversationAction = {
+        ...responseAction,
+        content: botResponseContent,
+      };
+      completeHistory = [...completeHistory, botResponse];
+    }
+    
+    setIsLoading(false);
+    setIsResponding(false);
     setNextBotIndex(0);
   };
 
@@ -335,39 +423,49 @@ export default function Home() {
     setIsLoading(true);
 
     // Get the complete conversation history
-    const completeHistory = messages;
+    const completeHistory = actions;
 
     const botMessageId = generateId();
-    const assistantMessage: ChatMessage = {
+    const responseAction: ConversationAction = {
+      type: "response",
       id: botMessageId,
-      role: "assistant",
       botId: bot.id,
       content: "",
       createdAt: Date.now(),
     };
 
-    // Add placeholder assistant message to state
-    setMessages((prev) => [...prev, assistantMessage]);
+    // Add placeholder response action to state
+    setActions((prev) => [...prev, responseAction]);
 
     // Generate the bot's response
     const finalContent = await streamBotReply(bot, botMessageId, completeHistory);
 
-    // Update the message with final content
-    setMessages((prev) =>
-      prev.map((msg) =>
-        msg.id === botMessageId
-          ? {
-              ...msg,
-              content: finalContent,
-            }
-          : msg
-      )
-    );
-
+    // Update the action with final content (already handled in streamBotReply)
     // Move to next bot
     setNextBotIndex((prev) => prev + 1);
     setIsLoading(false);
     setIsResponding(false);
+  };
+
+  const handleSkip = () => {
+    if (isLoading || isResponding || nextBotIndex >= bots.length) return;
+
+    const bot = bots[nextBotIndex];
+    if (!bot) return;
+
+    // Create skip action
+    const skipAction: ConversationAction = {
+      type: "skip",
+      id: generateId(),
+      botId: bot.id,
+      createdAt: Date.now(),
+    };
+
+    // Add skip action to conversation
+    setActions((prev) => [...prev, skipAction]);
+
+    // Move to next bot
+    setNextBotIndex((prev) => prev + 1);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -378,13 +476,13 @@ export default function Home() {
   };
 
   const getPreviewPayload = () => {
-    const previewMessages: ChatMessage[] = [...messages];
+    const previewActions: ConversationAction[] = [...actions];
     
     // If there's text in the input, include it as a user message in the preview
     if (input.trim()) {
-      previewMessages.push({
+      previewActions.push({
+        type: "user_message",
         id: "preview-user",
-        role: "user",
         content: input.trim(),
         createdAt: Date.now(),
       });
@@ -397,21 +495,25 @@ export default function Home() {
         const conversationContext = buildConversationContext(nextBot, bots);
         const turnInstruction = buildTurnInstruction(nextBot);
         
-        // Convert preview messages to API format
-        const historyMessages = previewMessages.map((msg) => {
-          const speaker = getSpeakerLabel(msg);
-          if (msg.role === "user") {
-            return {
-              role: "user" as const,
-              content: `${speaker}: ${msg.content}`,
-            };
-          } else {
-            return {
-              role: "assistant" as const,
-              content: `${speaker}: ${msg.content}`,
-            };
-          }
-        });
+        // Convert preview actions to API format
+        const historyMessages = previewActions
+          .filter((action) => action.type === "user_message" || action.type === "response")
+          .map((action) => {
+            const speaker = getSpeakerLabel(action);
+            if (action.type === "user_message") {
+              return {
+                role: "user" as const,
+                content: `${speaker}: ${action.content}`,
+              };
+            } else if (action.type === "response") {
+              return {
+                role: "assistant" as const,
+                content: `${speaker}: ${action.content}`,
+              };
+            }
+            return null;
+          })
+          .filter((msg): msg is { role: "user" | "assistant"; content: string } => msg !== null);
         
         const payload: {
           model: string;
@@ -467,6 +569,7 @@ export default function Home() {
     setEditingBot({
       id: null,
       name: "",
+      role: "",
       personality: "",
       description: "",
       model: "gpt-4o-mini",
@@ -480,6 +583,7 @@ export default function Home() {
     setEditingBot({
       id: bot.id,
       name: bot.name,
+      role: bot.role || "",
       personality: bot.personality || "",
       description: bot.description,
       model: bot.model,
@@ -508,6 +612,7 @@ export default function Home() {
       const newBot: BotConfig = {
         id: generateId(),
         name: editingBot.name.trim(),
+        role: editingBot.role.trim() || undefined,
         personality: editingBot.personality.trim() || undefined,
         description: editingBot.description.trim() || "",
         model: editingBot.model,
@@ -534,6 +639,7 @@ ROLE:
             ? {
                 ...b,
                 name: editingBot.name.trim(),
+                role: editingBot.role.trim() || undefined,
                 personality: editingBot.personality.trim() || undefined,
                 description: editingBot.description.trim() || "",
                 model: editingBot.model,
@@ -551,6 +657,82 @@ ROLE:
 
   return (
     <div className="flex flex-col h-screen bg-gray-50">
+      {/* Header Bar */}
+      <div className="bg-white border-b border-gray-200 px-6 py-3 flex items-center justify-between">
+        <div className="flex items-center gap-4">
+          <h1 className="text-lg font-semibold text-gray-800">{activityType}</h1>
+          <div className="flex items-center gap-2">
+            {bots.map((bot) => (
+              <div
+                key={bot.id}
+                className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center text-xs font-medium text-gray-700"
+                title={bot.role ? `${bot.name} (${bot.role})` : bot.name}
+              >
+                {bot.name.charAt(bot.name.length - 1)}
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="flex items-center gap-4">
+          <button
+            onClick={() => setShowBotList(true)}
+            className="px-3 py-1.5 text-sm bg-green-500 text-white rounded-md hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 transition-colors"
+          >
+            Manage Bots
+          </button>
+          <div className="flex items-center gap-4 text-sm text-gray-600">
+            <span>$0.00</span>
+            <span>0 tokens</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="flex flex-1 overflow-hidden">
+        {/* Left Sidebar - Participants */}
+        <div className="w-64 bg-white border-r border-gray-200 overflow-y-auto">
+          <div className="p-4">
+            <h2 className="text-sm font-semibold text-gray-700 mb-3">Participants</h2>
+            <div className="space-y-2">
+              {bots.map((bot) => (
+                <div
+                  key={bot.id}
+                  className="p-3 bg-gray-50 rounded-md border border-gray-200 hover:bg-gray-100 transition-colors cursor-pointer group relative"
+                  onClick={() => handleEditBot(bot)}
+                >
+                  <div className="flex items-center gap-2 mb-1">
+                    <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center text-xs font-medium text-gray-700 flex-shrink-0">
+                      {bot.name.charAt(bot.name.length - 1)}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-medium text-gray-800">{bot.name}</div>
+                      {bot.role && (
+                        <div className="text-xs text-gray-500">{bot.role}</div>
+                      )}
+                    </div>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleEditBot(bot);
+                      }}
+                      className="opacity-0 group-hover:opacity-100 transition-opacity text-gray-400 hover:text-gray-600 p-1"
+                      aria-label={`Edit ${bot.name}`}
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                      </svg>
+                    </button>
+                  </div>
+                  {bot.personality && (
+                    <p className="text-xs text-gray-600 mt-1 italic">{bot.personality}</p>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Main Content Area */}
+        <div className="flex-1 flex flex-col overflow-hidden relative">
       {/* Preview Prompt Button */}
       <div className="absolute top-4 left-4 z-10">
         <button
@@ -560,6 +742,116 @@ ROLE:
           Preview Prompt
         </button>
       </div>
+
+      {/* Bot List Modal */}
+      {showBotList && (
+        <div
+          className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4"
+          onClick={() => setShowBotList(false)}
+        >
+          <div
+            className="bg-white rounded-lg shadow-xl max-w-3xl w-full max-h-[90vh] flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex justify-between items-center p-4 border-b border-gray-200">
+              <h2 className="text-xl font-semibold text-gray-800">Manage Bots</h2>
+              <button
+                onClick={() => setShowBotList(false)}
+                className="text-gray-500 hover:text-gray-700 focus:outline-none focus:ring-2 focus:ring-gray-500 rounded p-1"
+                aria-label="Close"
+              >
+                <svg
+                  className="w-6 h-6"
+                  fill="none"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth="2"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path d="M6 18L18 6M6 6l12 12"></path>
+                </svg>
+              </button>
+            </div>
+            <div className="flex-1 overflow-auto p-4">
+              <div className="mb-4">
+                <button
+                  onClick={() => {
+                    handleCreateBot();
+                    setShowBotList(false);
+                  }}
+                  className="px-4 py-2 bg-green-500 text-white rounded-md hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 transition-colors"
+                >
+                  + Create New Bot
+                </button>
+              </div>
+              <div className="space-y-3">
+                {bots.map((bot) => (
+                  <div
+                    key={bot.id}
+                    className="flex items-start justify-between p-4 bg-gray-50 border border-gray-200 rounded-md"
+                  >
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-sm font-semibold text-gray-800">
+                          {bot.name}
+                        </span>
+                        {bot.role && (
+                          <span className="text-xs px-2 py-0.5 bg-purple-100 text-purple-700 rounded-full font-medium">
+                            {bot.role}
+                          </span>
+                        )}
+                        {bot.useWebSearch && (
+                          <span className="text-xs px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full">
+                            Web Search
+                          </span>
+                        )}
+                      </div>
+                      {bot.personality && (
+                        <p className="text-xs text-gray-600 mt-1 italic">
+                          Personality: {bot.personality}
+                        </p>
+                      )}
+                      <p className="text-xs text-gray-500 mt-1">{bot.description}</p>
+                      <p className="text-xs text-gray-400 mt-1">Model: {bot.model}</p>
+                    </div>
+                    <div className="flex gap-2 ml-4">
+                      <button
+                        onClick={() => {
+                          handleEditBot(bot);
+                          setShowBotList(false);
+                        }}
+                        className="px-3 py-1.5 text-xs bg-gray-100 text-gray-700 rounded hover:bg-gray-200 focus:outline-none focus:ring-2 focus:ring-gray-500 transition-colors"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        onClick={() => handleDeleteBot(bot.id)}
+                        className="px-3 py-1.5 text-xs bg-red-100 text-red-700 rounded hover:bg-red-200 focus:outline-none focus:ring-2 focus:ring-red-500 transition-colors"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                ))}
+                {bots.length === 0 && (
+                  <p className="text-sm text-gray-500 text-center py-8">
+                    No bots configured. Create one to get started!
+                  </p>
+                )}
+              </div>
+            </div>
+            <div className="flex justify-end p-4 border-t border-gray-200">
+              <button
+                onClick={() => setShowBotList(false)}
+                className="px-4 py-2 bg-gray-100 text-gray-700 rounded-md hover:bg-gray-200 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-2 transition-colors"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Bot Manager Modal */}
       {showBotManager && editingBot && (
@@ -613,6 +905,23 @@ ROLE:
                   className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                   placeholder="Bot name"
                 />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Role (Optional)
+                </label>
+                <input
+                  type="text"
+                  value={editingBot.role}
+                  onChange={(e) =>
+                    setEditingBot({ ...editingBot, role: e.target.value })
+                  }
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="e.g., Product Designer, Software Engineer"
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  The bot's role (e.g., Product Designer, Software Engineer, Product Manager).
+                </p>
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -756,7 +1065,7 @@ ROLE:
               <pre className="bg-gray-50 border border-gray-200 rounded p-4 overflow-x-auto text-sm">
                 <code>{JSON.stringify(getPreviewPayload(), null, 2)}</code>
               </pre>
-              {messages.length === 0 && !input.trim() && (
+              {actions.length === 0 && !input.trim() && (
                 <p className="text-sm text-amber-600 mt-4">
                   ⚠️ No messages yet. The payload above includes only the model selection.
                 </p>
@@ -786,129 +1095,196 @@ ROLE:
       )}
 
       <div className="flex-1 overflow-y-auto">
-        <div className="max-w-2xl mx-auto px-4 py-8">
-          {/* Rules Section */}
-          <div className="mb-6">
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Rules
-            </label>
-            <textarea
-              value={globalRules}
-              onChange={(e) => setGlobalRules(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
-              placeholder="Provide short, succinct and casual responses."
-              rows={2}
-            />
-            <p className="text-xs text-gray-500 mt-1">
-              These rules apply to all bots and will be included in their system prompts. Changes take effect immediately.
-            </p>
-          </div>
-
-          {/* Bots Section */}
-          <div className="mb-6">
-            <div className="flex items-center justify-between mb-2">
-              <label className="block text-sm font-medium text-gray-700">
-                Active Bots
-              </label>
-              <button
-                onClick={handleCreateBot}
-                className="px-3 py-1.5 text-sm bg-green-500 text-white rounded-md hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 transition-colors"
-              >
-                + Create Bot
-              </button>
-            </div>
-            <div className="space-y-2">
-              {bots.map((bot) => (
-                <div
-                  key={bot.id}
-                  className="flex items-start justify-between p-3 bg-white border border-gray-200 rounded-md"
-                >
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium text-gray-800">
-                        {bot.name}
-                      </span>
-                      {bot.useWebSearch && (
-                        <span className="text-xs px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full">
-                          Web Search
-                        </span>
-                      )}
-                    </div>
-                    {bot.personality && (
-                      <p className="text-xs text-gray-600 mt-1 italic">
-                        Personality: {bot.personality}
-                      </p>
-                    )}
-                    <p className="text-xs text-gray-500 mt-1">{bot.description}</p>
-                    <p className="text-xs text-gray-400 mt-1">Model: {bot.model}</p>
-                  </div>
-                  <div className="flex gap-2 ml-4">
-                    <button
-                      onClick={() => handleEditBot(bot)}
-                      className="px-2 py-1 text-xs bg-gray-100 text-gray-700 rounded hover:bg-gray-200 focus:outline-none focus:ring-2 focus:ring-gray-500 transition-colors"
-                    >
-                      Edit
-                    </button>
-                    <button
-                      onClick={() => handleDeleteBot(bot.id)}
-                      className="px-2 py-1 text-xs bg-red-100 text-red-700 rounded hover:bg-red-200 focus:outline-none focus:ring-2 focus:ring-red-500 transition-colors"
-                    >
-                      Delete
-                    </button>
-                  </div>
+        <div className="max-w-4xl mx-auto px-4 py-8">
+          {/* Activity Section - Enhanced with card-based layout */}
+          <div className="mb-4 bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
+            <div className="space-y-3">
+              {/* Activity Type */}
+              <div className="flex items-start gap-3">
+                <div className="flex-shrink-0 mt-1">
+                  <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                  </svg>
                 </div>
-              ))}
-              {bots.length === 0 && (
-                <p className="text-sm text-gray-500 text-center py-4">
-                  No bots configured. Create one to get started!
-                </p>
-              )}
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 mb-1">
+                    <label className="text-sm font-semibold text-gray-700">
+                      Game Type
+                    </label>
+                    <button
+                      onClick={() => setEditingActivityType(!editingActivityType)}
+                      className="text-gray-400 hover:text-gray-600 transition-colors"
+                      aria-label="Edit activity type"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                      </svg>
+                    </button>
+                  </div>
+                  {editingActivityType ? (
+                    <input
+                      type="text"
+                      value={activityType}
+                      onChange={(e) => setActivityType(e.target.value)}
+                      onBlur={() => setEditingActivityType(false)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          setEditingActivityType(false);
+                        }
+                      }}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                      autoFocus
+                    />
+                  ) : (
+                    <div className="text-sm text-gray-800 font-medium">
+                      {activityType}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Prompt */}
+              <div className="flex items-start gap-3">
+                <div className="flex-shrink-0 mt-1">
+                  <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+                  </svg>
+                </div>
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 mb-1">
+                    <label className="text-sm font-semibold text-gray-700">
+                      Prompt
+                    </label>
+                    <button
+                      onClick={() => setEditingPrompt(!editingPrompt)}
+                      className="text-gray-400 hover:text-gray-600 transition-colors"
+                      aria-label="Edit prompt"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                      </svg>
+                    </button>
+                  </div>
+                  {editingPrompt ? (
+                    <textarea
+                      value={activityPrompt}
+                      onChange={(e) => setActivityPrompt(e.target.value)}
+                      onBlur={() => setEditingPrompt(false)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none text-sm"
+                      rows={2}
+                      placeholder="Enter the activity prompt..."
+                      autoFocus
+                    />
+                  ) : (
+                    <div className="text-sm text-gray-800">
+                      {activityPrompt || <span className="text-gray-400 italic">No prompt set</span>}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Rules */}
+              <div className="flex items-start gap-3">
+                <div className="flex-shrink-0 mt-1">
+                  <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                </div>
+                <div className="flex-1">
+                  <label className="text-sm font-semibold text-gray-700 mb-1 block">
+                    Rules
+                  </label>
+                  <textarea
+                    value={globalRules}
+                    onChange={(e) => setGlobalRules(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none text-sm"
+                    placeholder="Provide a short, succinct and casual response."
+                    rows={2}
+                  />
+                </div>
+              </div>
             </div>
           </div>
 
-          {/* Messages */}
+          {/* Conversation Actions */}
           <div className="space-y-4">
-            {messages.length === 0 && (
+            {actions.length === 0 && (
               <div className="text-center text-gray-500 mt-12">
                 Start a conversation by typing a message below.
               </div>
             )}
-            {messages.map((message) => {
-              if (message.role === "user") {
+            {actions.map((action) => {
+              if (action.type === "user_message") {
                 return (
-                  <div key={message.id} className="flex justify-end mb-3">
-                    <div className="max-w-[80%] rounded-lg px-4 py-2 bg-blue-500 text-white">
-                      <div className="whitespace-pre-wrap break-words">
-                        {message.content}
+                  <div key={action.id} className="flex justify-end mb-4">
+                    <div className="max-w-[75%] rounded-lg px-4 py-2.5 bg-blue-500 text-white shadow-sm">
+                      <div className="whitespace-pre-wrap break-words text-sm">
+                        {action.content}
                       </div>
                     </div>
                   </div>
                 );
               }
 
-              const bot = bots.find((b) => b.id === message.botId);
-
-              return (
-                <div key={message.id} className="flex justify-start mb-3">
-                  <div className="flex flex-col max-w-[80%]">
-                    {bot && (
-                      <span className="text-xs font-medium mb-1 px-2 py-0.5 rounded-full bg-gray-200 text-gray-700 inline-block w-fit">
-                        {bot.name}
-                      </span>
-                    )}
-                    <div className="bg-white text-gray-800 border border-gray-200 rounded-lg px-4 py-2">
-                      <div className="whitespace-pre-wrap break-words">
-                        {message.content || (isLoading ? "Thinking..." : "")}
+              if (action.type === "skip") {
+                const bot = bots.find((b) => b.id === action.botId);
+                return (
+                  <div key={action.id} className="flex justify-start mb-4">
+                    <div className="flex flex-col max-w-[75%]">
+                      {bot && (
+                        <div className="flex items-center gap-2 mb-1.5">
+                          <span className="text-xs font-semibold text-gray-700">
+                            {bot.name}
+                          </span>
+                          {bot.role && (
+                            <span className="text-xs px-2 py-0.5 rounded-full bg-purple-100 text-purple-700 font-medium">
+                              {bot.role}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                      <div className="bg-gray-50 text-gray-500 border border-gray-200 rounded-lg px-4 py-2.5 italic text-sm">
+                        {bot?.name || "Bot"} skipped
                       </div>
                     </div>
-                    {message.responseTimeMs !== undefined && (
-                      <div className="text-xs text-gray-400 mt-1">
-                        {formatResponseTime(message.responseTimeMs)}
-                      </div>
-                    )}
                   </div>
-                </div>
-              );
+                );
+              }
+
+              if (action.type === "response") {
+                const bot = bots.find((b) => b.id === action.botId);
+
+                return (
+                  <div key={action.id} className="flex justify-start mb-4">
+                    <div className="flex flex-col max-w-[75%]">
+                      {bot && (
+                        <div className="flex items-center gap-2 mb-1.5">
+                          <span className="text-xs font-semibold text-gray-700">
+                            {bot.name}
+                          </span>
+                          {bot.role && (
+                            <span className="text-xs px-2 py-0.5 rounded-full bg-purple-100 text-purple-700 font-medium">
+                              {bot.role}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                      <div className="bg-white text-gray-800 border border-gray-200 rounded-lg px-4 py-2.5 shadow-sm">
+                        <div className="whitespace-pre-wrap break-words text-sm leading-relaxed">
+                          {action.content || (isLoading ? "Thinking..." : "")}
+                        </div>
+                      </div>
+                      {action.responseTimeMs !== undefined && (
+                        <div className="text-xs text-gray-400 mt-1.5 ml-1">
+                          {formatResponseTime(action.responseTimeMs)}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              }
+
+              return null;
             })}
             <div ref={messagesEndRef} />
           </div>
@@ -917,7 +1293,7 @@ ROLE:
 
       {/* Input Area */}
       <div className="border-t border-gray-200 bg-white">
-        <div className="max-w-2xl mx-auto px-4 py-4">
+        <div className="max-w-4xl mx-auto px-4 py-4">
           <div className="flex gap-2">
             <textarea
               value={input}
@@ -936,27 +1312,14 @@ ROLE:
             />
             <button
               onClick={sendMessage}
-              disabled={isLoading || isResponding || !input.trim()}
+              disabled={isLoading || isResponding}
               className="px-6 py-2 bg-blue-500 text-white rounded-md hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
             >
               Send
             </button>
           </div>
-          {/* Generate Next Response Button */}
-          {nextBotIndex < bots.length && messages.length > 0 && (
-            <div className="mt-3 flex items-center gap-2">
-              <button
-                onClick={generateNextResponse}
-                disabled={isLoading || isResponding}
-                className="px-4 py-2 bg-green-500 text-white rounded-md hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
-              >
-                Generate next response ({bots[nextBotIndex]?.name || "Bot"})
-              </button>
-              <span className="text-xs text-gray-500">
-                {nextBotIndex + 1} of {bots.length} bots remaining
-              </span>
-            </div>
-          )}
+        </div>
+      </div>
         </div>
       </div>
     </div>

@@ -1,6 +1,7 @@
 export type BotConfig = {
   id: string;
   name: string;
+  role?: string; // Optional: role of the bot (e.g., "Product Designer", "Software Engineer")
   personality?: string; // Optional: describes the bot's perspective and knowledge
   description: string;
   systemPrompt: string;
@@ -14,6 +15,7 @@ export const DEFAULT_BOTS: BotConfig[] = [
   {
     id: "bot-1",
     name: "Bot-1",
+    role: "Product Designer",
     personality: "Optimistic and enthusiastic",
     description: "A positive and encouraging participant.",
     model: "gpt-4o-mini",
@@ -24,6 +26,7 @@ export const DEFAULT_BOTS: BotConfig[] = [
   {
     id: "bot-2",
     name: "Bot-2",
+    role: "Software Engineer",
     personality: "Cautious and analytical",
     description: "A careful and thoughtful participant.",
     model: "gpt-4o-mini",
@@ -34,6 +37,7 @@ export const DEFAULT_BOTS: BotConfig[] = [
   {
     id: "bot-3",
     name: "Bot-3",
+    role: "Product Manager",
     personality: "Creative and curious",
     description: "An imaginative and inquisitive participant.",
     model: "gpt-4o-mini",

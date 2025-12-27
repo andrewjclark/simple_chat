@@ -105,7 +105,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const { messages, model, useWebSearch } = body;
+    const { messages, model, useWebSearch, systemPrompt } = body;
 
     // Validate messages
     if (!messages) {
@@ -164,13 +164,26 @@ export async function POST(req: NextRequest) {
         );
       }
 
+      // Build input messages array
+      // Check if messages already contains a system message
+      const hasSystemMessage = messages.some((m: { role: string }) => m.role === "system");
+      
+      // If systemPrompt is provided and there's no system message in messages, prepend it
+      // Otherwise, use the system message from messages array
+      const inputMessages = [
+        systemPrompt && !hasSystemMessage
+          ? { role: "system" as const, content: systemPrompt }
+          : null,
+        ...messages.map((m: { role: string; content: string }) => ({
+          role: m.role as "user" | "assistant" | "system",
+          content: m.content,
+        })),
+      ].filter(Boolean) as Array<{ role: "user" | "assistant" | "system"; content: string }>;
+
       responseStream = await openai.responses.create({
         model,
         stream: true,
-        input: messages.map((m: { role: string; content: string }) => ({
-          role: m.role,
-          content: m.content,
-        })),
+        input: inputMessages,
         ...(useWebSearch
           ? {
               tools: [

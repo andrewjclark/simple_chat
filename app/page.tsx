@@ -37,11 +37,17 @@ export default function Home() {
     DEFAULT_BOTS[0]?.rules || "Provide a short, succinct and casual response."
   );
   const [nextBotIndex, setNextBotIndex] = useState<number>(0);
+  const [activityName, setActivityName] = useState<string>("Brainstorm");
   const [activityType, setActivityType] = useState<string>("Brainstorming Session");
-  const [activityPrompt, setActivityPrompt] = useState<string>("");
+  const [playerRules, setPlayerRules] = useState<string>("When generating ideas respond with a single idea and no more than a single sentence - this allows everyone a chance to contribute.");
+  const [moderatorRules, setModeratorRules] = useState<string>("Once there have been a large number of ideas suggested (at least 2 per player) then choose the one you think is most interesting and ask the participants to go deeper. Once an idea has been fully explored choose another idea and pursue this.");
+  const [editingActivityName, setEditingActivityName] = useState<boolean>(false);
   const [editingActivityType, setEditingActivityType] = useState<boolean>(false);
-  const [editingPrompt, setEditingPrompt] = useState<boolean>(false);
+  const [editingPlayerRules, setEditingPlayerRules] = useState<boolean>(false);
+  const [editingModeratorRules, setEditingModeratorRules] = useState<boolean>(false);
   const [showBotList, setShowBotList] = useState<boolean>(false);
+  const [userRole, setUserRole] = useState<string>("Moderator");
+  const [editingUserRole, setEditingUserRole] = useState<boolean>(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -87,56 +93,57 @@ export default function Home() {
     }
   };
 
-  // Helper function to build the conversation context system message
-  const buildConversationContext = (
+  // Helper function to build a single comprehensive system message (matching Swift pattern)
+  const buildSystemMessage = (
     bot: BotConfig,
     allBots: BotConfig[]
   ): string => {
+    const systemRoleStrings: string[] = [];
+    
     // Build list of all bot names
     const botNames = allBots.map(b => b.name).join(", ");
+    systemRoleStrings.push(`This is a multi-user conversation between ${botNames} and the ${userRole.toLowerCase()}`);
     
-    // Build role text
-    const roleText = bot.role 
-      ? `a ${bot.role}`
-      : "";
-    
-    // Build description of the bot
-    const botDescription = bot.description || `a participant named ${bot.name}`;
-    
-    // Build personality text
-    const personalityText = bot.personality 
-      ? ` Your personality is: ${bot.personality}.`
-      : "";
-    
-    // Add activity prompt if available
-    const promptText = activityPrompt 
-      ? `\n\nThe current activity prompt is: "${activityPrompt}"`
-      : "";
-    
-    // Construct the "You are" statement
-    let youAreStatement = `You are ${bot.name}`;
-    if (roleText) {
-      youAreStatement += `, ${roleText}`;
+    // You are [name]
+    let youAreText = `You are ${bot.name}`;
+    if (bot.role) {
+      youAreText += `, a ${bot.role}`;
     }
-    youAreStatement += `. You are: ${botDescription}.`;
+    systemRoleStrings.push(youAreText);
     
-    return `This is a multi-user conversation between ${botNames} and the user. ${youAreStatement}${personalityText}${promptText}`;
-  };
-
-  // Helper function to build the turn instruction system message
-  const buildTurnInstruction = (bot: BotConfig): string => {
-    // Use global rules if available, otherwise fall back to bot-specific rules
+    // Personality
+    if (bot.personality) {
+      systemRoleStrings.push(`In your own words you are: ${bot.personality}`);
+    }
+    
+    // Description
+    if (bot.description) {
+      systemRoleStrings.push(`You are: ${bot.description}`);
+    }
+    
+    // Game type
+    if (activityType) {
+      systemRoleStrings.push(`This conversation is a ${activityType}`);
+    }
+    
+    // Player rules
+    if (playerRules) {
+      systemRoleStrings.push(playerRules);
+    }
+    
+    // Global rules (if any)
     const rulesToUse = globalRules || bot.rules || "";
-    const rulesText = rulesToUse 
-      ? ` ${rulesToUse}`
-      : "";
+    if (rulesToUse) {
+      systemRoleStrings.push(rulesToUse);
+    }
     
-    return `${bot.name}, it is your turn to respond now. Your response will be added to the conversation log and then someone else will respond.${rulesText}`;
+    // Join all with ". " separator
+    return systemRoleStrings.join(". ");
   };
 
   // Helper function to get speaker label for an action
   const getSpeakerLabel = (action: ConversationAction): string => {
-    if (action.type === "user_message") return "User";
+    if (action.type === "user_message") return userRole;
     if (action.type === "response" || action.type === "skip") {
       const bot = bots.find((b) => b.id === action.botId);
       if (bot) return bot.name;
@@ -169,12 +176,10 @@ export default function Home() {
     const startTime = performance.now();
     
     // Build the message array with proper role structure:
-    // 1. System message with conversation context
+    // 1. Single system message with all context (matching Swift pattern)
     // 2. Array of conversation history messages (user and assistant)
-    // 3. Final system message with turn instruction
     
-    const conversationContext = buildConversationContext(bot, bots);
-    const turnInstruction = buildTurnInstruction(bot);
+    const systemMessage = buildSystemMessage(bot, bots);
     
     // Convert history to API format with proper roles
     const historyMessages = history
@@ -187,8 +192,11 @@ export default function Home() {
             content: `${speaker}: ${action.content}`,
           };
         } else if (action.type === "response") {
+          // Only messages from the current bot should be "assistant"
+          // All other bots' messages should be "user" from this bot's perspective
+          const isCurrentBot = action.botId === bot.id;
           return {
-            role: "assistant" as const,
+            role: (isCurrentBot ? "assistant" : "user") as const,
             content: `${speaker}: ${action.content}`,
           };
         }
@@ -200,12 +208,12 @@ export default function Home() {
     const apiMessages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
       {
         role: "system",
-        content: conversationContext,
+        content: systemMessage,
       },
       ...historyMessages,
       {
         role: "system",
-        content: turnInstruction,
+        content: `${bot.name}, it is your turn now. Please respond.`,
       },
     ];
 
@@ -492,8 +500,7 @@ export default function Home() {
       const nextBot = bots[nextBotIndex];
       if (nextBot) {
         // Build message array with same structure as streamBotReply
-        const conversationContext = buildConversationContext(nextBot, bots);
-        const turnInstruction = buildTurnInstruction(nextBot);
+        const systemMessage = buildSystemMessage(nextBot, bots);
         
         // Convert preview actions to API format
         const historyMessages = previewActions
@@ -506,8 +513,11 @@ export default function Home() {
                 content: `${speaker}: ${action.content}`,
               };
             } else if (action.type === "response") {
+              // Only messages from the current bot should be "assistant"
+              // All other bots' messages should be "user" from this bot's perspective
+              const isCurrentBot = action.botId === nextBot.id;
               return {
-                role: "assistant" as const,
+                role: (isCurrentBot ? "assistant" : "user") as const,
                 content: `${speaker}: ${action.content}`,
               };
             }
@@ -526,12 +536,12 @@ export default function Home() {
           input: [
             {
               role: "system",
-              content: conversationContext,
+              content: systemMessage,
             },
             ...historyMessages,
             {
               role: "system",
-              content: turnInstruction,
+              content: `${nextBot.name}, it is your turn now. Please respond.`,
             },
           ],
         };
@@ -660,7 +670,7 @@ ROLE:
       {/* Header Bar */}
       <div className="bg-white border-b border-gray-200 px-6 py-3 flex items-center justify-between">
         <div className="flex items-center gap-4">
-          <h1 className="text-lg font-semibold text-gray-800">{activityType}</h1>
+          <h1 className="text-lg font-semibold text-gray-800">{activityName}</h1>
           <div className="flex items-center gap-2">
             {bots.map((bot) => (
               <div
@@ -1063,7 +1073,7 @@ ROLE:
                 </p>
               </div>
               <pre className="bg-gray-50 border border-gray-200 rounded p-4 overflow-x-auto text-sm">
-                <code>{JSON.stringify(getPreviewPayload(), null, 2)}</code>
+                <code className="text-gray-800">{JSON.stringify(getPreviewPayload(), null, 2)}</code>
               </pre>
               {actions.length === 0 && !input.trim() && (
                 <p className="text-sm text-amber-600 mt-4">
@@ -1099,6 +1109,50 @@ ROLE:
           {/* Activity Section - Enhanced with card-based layout */}
           <div className="mb-4 bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
             <div className="space-y-3">
+              {/* Activity Name */}
+              <div className="flex items-start gap-3">
+                <div className="flex-shrink-0 mt-1">
+                  <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
+                  </svg>
+                </div>
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 mb-1">
+                    <label className="text-sm font-semibold text-gray-700">
+                      Name
+                    </label>
+                    <button
+                      onClick={() => setEditingActivityName(!editingActivityName)}
+                      className="text-gray-400 hover:text-gray-600 transition-colors"
+                      aria-label="Edit activity name"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                      </svg>
+                    </button>
+                  </div>
+                  {editingActivityName ? (
+                    <input
+                      type="text"
+                      value={activityName}
+                      onChange={(e) => setActivityName(e.target.value)}
+                      onBlur={() => setEditingActivityName(false)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          setEditingActivityName(false);
+                        }
+                      }}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                      autoFocus
+                    />
+                  ) : (
+                    <div className="text-sm text-gray-800 font-medium">
+                      {activityName}
+                    </div>
+                  )}
+                </div>
+              </div>
+
               {/* Activity Type */}
               <div className="flex items-start gap-3">
                 <div className="flex-shrink-0 mt-1">
@@ -1143,41 +1197,126 @@ ROLE:
                 </div>
               </div>
 
-              {/* Prompt */}
+              {/* Player Rules */}
               <div className="flex items-start gap-3">
                 <div className="flex-shrink-0 mt-1">
                   <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
                   </svg>
                 </div>
                 <div className="flex-1">
                   <div className="flex items-center gap-2 mb-1">
                     <label className="text-sm font-semibold text-gray-700">
-                      Prompt
+                      Player Rules
                     </label>
                     <button
-                      onClick={() => setEditingPrompt(!editingPrompt)}
+                      onClick={() => setEditingPlayerRules(!editingPlayerRules)}
                       className="text-gray-400 hover:text-gray-600 transition-colors"
-                      aria-label="Edit prompt"
+                      aria-label="Edit player rules"
                     >
                       <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
                       </svg>
                     </button>
                   </div>
-                  {editingPrompt ? (
+                  {editingPlayerRules ? (
                     <textarea
-                      value={activityPrompt}
-                      onChange={(e) => setActivityPrompt(e.target.value)}
-                      onBlur={() => setEditingPrompt(false)}
+                      value={playerRules}
+                      onChange={(e) => setPlayerRules(e.target.value)}
+                      onBlur={() => setEditingPlayerRules(false)}
                       className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none text-sm"
-                      rows={2}
-                      placeholder="Enter the activity prompt..."
+                      rows={3}
+                      placeholder="Enter player rules..."
                       autoFocus
                     />
                   ) : (
                     <div className="text-sm text-gray-800">
-                      {activityPrompt || <span className="text-gray-400 italic">No prompt set</span>}
+                      {playerRules || <span className="text-gray-400 italic">No player rules set</span>}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Moderator Rules */}
+              <div className="flex items-start gap-3">
+                <div className="flex-shrink-0 mt-1">
+                  <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                  </svg>
+                </div>
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 mb-1">
+                    <label className="text-sm font-semibold text-gray-700">
+                      Moderator Rules
+                    </label>
+                    <button
+                      onClick={() => setEditingModeratorRules(!editingModeratorRules)}
+                      className="text-gray-400 hover:text-gray-600 transition-colors"
+                      aria-label="Edit moderator rules"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                      </svg>
+                    </button>
+                  </div>
+                  {editingModeratorRules ? (
+                    <textarea
+                      value={moderatorRules}
+                      onChange={(e) => setModeratorRules(e.target.value)}
+                      onBlur={() => setEditingModeratorRules(false)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none text-sm"
+                      rows={3}
+                      placeholder="Enter moderator rules..."
+                      autoFocus
+                    />
+                  ) : (
+                    <div className="text-sm text-gray-800">
+                      {moderatorRules || <span className="text-gray-400 italic">No moderator rules set</span>}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* User Role */}
+              <div className="flex items-start gap-3">
+                <div className="flex-shrink-0 mt-1">
+                  <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                  </svg>
+                </div>
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 mb-1">
+                    <label className="text-sm font-semibold text-gray-700">
+                      Your Role
+                    </label>
+                    <button
+                      onClick={() => setEditingUserRole(!editingUserRole)}
+                      className="text-gray-400 hover:text-gray-600 transition-colors"
+                      aria-label="Edit user role"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                      </svg>
+                    </button>
+                  </div>
+                  {editingUserRole ? (
+                    <input
+                      type="text"
+                      value={userRole}
+                      onChange={(e) => setUserRole(e.target.value)}
+                      onBlur={() => setEditingUserRole(false)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          setEditingUserRole(false);
+                        }
+                      }}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                      autoFocus
+                      placeholder="e.g., Moderator, Leader"
+                    />
+                  ) : (
+                    <div className="text-sm text-gray-800 font-medium">
+                      {userRole}
                     </div>
                   )}
                 </div>
